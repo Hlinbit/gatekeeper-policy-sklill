@@ -24,6 +24,56 @@ Always produce:
 4. **Write gator tests** - Create test cases covering pass and fail scenarios
 5. **Validate with gator** - Ensure all tests pass before delivery
 
+## Output directory layout and relative paths
+
+Create a top-level directory named after the policy. All generated test artifacts must be placed under this policy directory.
+
+```
+<policy name>/
+  policy/
+    suite.yaml
+    template.yaml
+    constraint.yaml
+  cases/
+    case1.yaml
+    case2.yaml
+```
+
+### How relative paths are resolved
+
+`gator verify` resolves any relative path in `suite.yaml` **from the directory that contains `suite.yaml`** (not from the repo root).  
+In this layout, that base directory is:
+
+- `<policy name>/policy/`
+
+### What to reference from `suite.yaml`
+
+- `template.yaml` and `constraint.yaml` are in the same folder as `suite.yaml`, so reference them directly:
+  - `template: template.yaml`
+  - `constraint: constraint.yaml`
+
+- Case manifests live in `<policy name>/cases/`, which is a sibling of `policy/`.  
+  From `<policy name>/policy/` to `<policy name>/cases/`:
+  - go up one level: `..`
+  - then enter `cases/`
+
+  So each case object path must be:
+  - `object: ../cases/<case-file>.yaml`
+
+### Example
+
+```yaml
+tests:
+  - name: example
+    template: template.yaml
+    constraint: constraint.yaml
+    cases:
+      - name: case1
+        object: ../cases/case1.yaml
+      - name: case2
+        object: ../cases/case2.yaml
+
+
 ## ConstraintTemplate Guidelines
 
 ### Structure
@@ -127,51 +177,143 @@ match:
 excludedNamespaces: ["kube-system", "gatekeeper-system"]
 ```
 
-## Gator Test Guidelines
+## Gator Test Guidelines (Correct)
 
-### Test Structure
+Gatekeeper Gator supports two workflows:
+
+- **`gator test`**: ad-hoc evaluation (no assertions), useful for quick checks.
+- **`gator verify`**: suite-based tests with assertions, suitable for CI and regression testing.
+
+This guide focuses on the **correct `gator verify` Suite format**, and also includes a minimal `gator test` example.
+
+---
+
+### 1) Use `gator verify` with a Suite (Recommended for CI)
+
+#### Directory Layout (Required by Suite format)
+
+A Suite references other files by **relative path**:
+
+<policy name>/
+  policy/
+    suite.yaml
+    template.yaml
+    constraint.yaml
+  cases/
+    case1.yaml
+    case2.yaml
+
+
+#### Suite File Format (Correct)
 
 ```yaml
-# test/test.yaml
-kind: TestSuite
+# suite.yaml
+kind: Suite
 apiVersion: test.gatekeeper.sh/v1alpha1
 metadata:
-  name: <test-suite-name>
-templates:
-  - <template-content>
-constraints:
-  - <constraint-content>
+  name: <suite-name>
+  annotations:
+    description: "<optional description>"
+
 tests:
   - name: <test-name>
-    template: <template-name>
-    kind: <constraint-kind>
-    constraint: <constraint-name>
+    template: template.yaml       # path to ConstraintTemplate YAML
+    constraint: constraint.yaml   # path to Constraint YAML
+
     cases:
-      - name: <case-name>
-        object: <test-object>
+      - name: <case-name-1>
+        object: cases/case1.yaml  # IMPORTANT: string path to YAML file
         assertions:
           - violations: no
-          # or
+
+      - name: <case-name-2>
+        object: cases/case2.yaml  # IMPORTANT: string path to YAML file
+        assertions:
           - violations: yes
-            message: <expected-message>
+            message: "<substring expected in violation message>"
 ```
 
-### Assertion Types
+✅ Key rules
 
+- kind MUST be Suite (not TestSuite).
+
+- template and constraint MUST be file paths, not resource names.
+
+- cases[].object MUST be a string file path to a YAML file.
+
+Do not inline the Kubernetes object under object:. That will fail with:
+cannot unmarshal object ... object of type string.
+
+```bash
+gator verify -f suite.yaml
+```
+#### 2) Assertion Types (Suite / gator verify)
 ```yaml
 # No violations expected
 assertions:
   - violations: no
 
-# Violations expected with specific message
+# At least one violation expected
+assertions:
+  - violations: yes
+
+# Violation expected and message contains substring
 assertions:
   - violations: yes
     message: "must have"
 
-# Specific number of violations
+# Specific number of violations expected (exact count)
 assertions:
   - violations: 2
 ```
+Notes: message is typically treated as a substring match; keep it stable (avoid full exact messages if formatting may vary).
+
+#### 3) Use gator test for Quick Evaluation (No Suite)
+
+gator test evaluates a set of YAML files and prints violations. It does not use assertions.
+
+Files
+
+- template.yaml (ConstraintTemplate)
+
+- constraint.yaml (Constraint)
+
+- pod-bad.yaml (should violate)
+
+- pod-good.yaml (should pass)
+
+```bash
+gator test -f template.yaml -f constraint.yaml -f pod-bad.yaml -f pod-good.yaml
+```
+Expected behavior:
+
+- pod-bad.yaml shows one or more violations
+
+- pod-good.yaml shows no violations
+
+#### 4) Workload vs Pod: Make Rego Match Your Constraint
+
+If your constraint matches Deployment/StatefulSet/..., remember:
+
+- Pod volumes: spec.volumes
+
+- Workload volumes: spec.template.spec.volumes
+
+Either:
+
+restrict match.kinds to Pod only, or write Rego that handles both Pod and Workload PodSpec paths (recommended), e.g. read from spec for Pod and spec.template.spec for workloads.
+
+This prevents false “passes” where the constraint matches a Deployment but the Rego only inspects Pod fields.
+
+#### Summary
+
+For CI/regression: use gator verify + Suite.
+
+Suite must reference template/constraint/case objects by file paths.
+
+cases[].object must be a string path, not an inline manifest.
+
+Use gator test for fast, assertion-less evaluation.
 
 ### Test Best Practices
 
@@ -224,15 +366,7 @@ Block specific field values or configurations.
 ## Validation Commands
 
 ```bash
-# Run gator tests
-gator test test/
-
-# Verify ConstraintTemplate syntax
-gator verify <template.yaml>
-
-# Test against cluster (if available)
-kubectl apply -f template.yaml
-kubectl apply -f constraint.yaml
+gator verify -f suite.yaml
 ```
 
 ## Reference
